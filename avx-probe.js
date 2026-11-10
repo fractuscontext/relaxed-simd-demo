@@ -40,6 +40,7 @@ async function cpuProbe() {
     userAgent: navigator.userAgent ?? null,
     platform: navigator.platform ?? null,
     cores: navigator.hardwareConcurrency ?? null,
+    chBrands: null,
     chPlatform: null,
     chPlatformVersion: null,
     chArchitecture: null,
@@ -53,6 +54,12 @@ async function cpuProbe() {
 
   // User-Agent Client Hints (Chromium only).
   try {
+    if (Array.isArray(navigator.userAgentData?.brands)) {
+      out.chBrands = navigator.userAgentData.brands
+        .filter((b) => !/not.?a.?brand/i.test(b.brand))
+        .map((b) => b.brand + " " + b.version)
+        .join(", ") || null;
+    }
     if (navigator.userAgentData?.getHighEntropyValues) {
       const h = await navigator.userAgentData.getHighEntropyValues(
         ["architecture", "bitness", "platform", "platformVersion"]

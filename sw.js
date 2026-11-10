@@ -3,7 +3,7 @@
 importScripts('avx-probe.js');
 
 // Bump this version to roll out a new cache and evict the old one.
-const CACHE = 'self-serving-v2';
+const CACHE = 'self-serving-v3';
 
 // The app shell: everything needed to render the site offline.
 const ASSETS = [
@@ -37,6 +37,20 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const { request } = event;
   if (request.method !== 'GET') return;
+
+  // Page loads (navigations) skip the service worker while online.
+  // A navigation answered by respondWith() never passes through the browser's normal
+  // network path, so extensions that attach a UA spoof to that path never see the page
+  // and the page's navigator falls back to the true identity. Returning without
+  // respondWith() lets the browser fetch the page itself, and the page stays controlled
+  // by this service worker either way. Offline, the cached copy still serves the page.
+  if (request.mode === 'navigate') {
+    if (self.navigator.onLine) return;
+    event.respondWith(
+      caches.match(request).then(hit => hit || caches.match('./index.html'))
+    );
+    return;
+  }
 
   event.respondWith(
     fetch(request).then(response => {

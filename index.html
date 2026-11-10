@@ -10,119 +10,90 @@
 
 <p><button id="reload">Reload page</button></p>
 
-<h2>Status</h2>
 <table border="1" cellpadding="4" cellspacing="0">
   <tr><th align="left">Service worker</th><td id="status">Checking...</td></tr>
+  <tr><th align="left">Service worker probe</th><td id="probe-status">Waiting...</td></tr>
 </table>
 
-<h2>Verdict</h2>
-<table border="1" cellpadding="4" cellspacing="0" id="verdicts">
-  <tr><td>Waiting...</td></tr>
-</table>
-
-<h2>Page vs service worker</h2>
-<p>[differs] marks a service worker value that does not match the page value.</p>
+<h2>Results</h2>
 <table border="1" cellpadding="4" cellspacing="0" id="results"></table>
 
 <!-- Loads cpuProbe() into the page scope. -->
 <script src="avx-probe.js"></script>
 <script>
+  // One row per field. Each row names the probe key to read for every column;
+  // null means the column does not apply to that field and stays empty.
+  //   ch:  page Client Hints (navigator.userAgentData)
+  //   nav: page navigator
+  //   sw:  service worker navigator
+  //   hw:  hardware measured by avx-probe.js
   const ROWS = [
-    { group: 'Reported by navigator' },
-    { key: 'userAgent', label: 'userAgent' },
-    { key: 'platform', label: 'platform' },
-    { key: 'cores', label: 'hardwareConcurrency' },
-    { group: 'Reported by Client Hints' },
-    { key: 'chPlatform', label: 'platform' },
-    { key: 'chPlatformVersion', label: 'platformVersion' },
-    { key: 'chArchitecture', label: 'architecture' },
-    { key: 'chBitness', label: 'bitness' },
-    { group: 'Measured by relaxed SIMD (avx-probe.js)' },
-    { key: 'relaxedSimd', label: 'supported' },
-    { key: 'isa', label: 'truncation ISA' },
-    { key: 'fusedMadd', label: 'fused madd' },
-    { key: 'inferred', label: 'inferred CPU' },
-    { key: 'error', label: 'errors' },
+    { label: 'user agent',       ch: 'chBrands',          nav: 'userAgent', sw: 'userAgent', hw: null },
+    { label: 'platform',         ch: 'chPlatform',        nav: 'platform',  sw: 'platform',  hw: null },
+    { label: 'platform version', ch: 'chPlatformVersion', nav: null,        sw: null,        hw: null },
+    { label: 'architecture',     ch: 'chArchitecture',    nav: null,        sw: null,        hw: 'isa' },
+    { label: 'bitness',          ch: 'chBitness',         nav: null,        sw: null,        hw: null },
+    { label: 'CPU cores',        ch: null,                nav: 'cores',     sw: 'cores',     hw: null },
+    { label: 'FMA',              ch: null,                nav: null,        sw: null,        hw: 'fusedMadd' },
+    { label: 'relaxed SIMD',     ch: null,                nav: null,        sw: null,        hw: 'relaxedSimd' },
+    { label: 'CPU',              ch: null,                nav: null,        sw: null,        hw: 'inferred' },
+    { label: 'errors',           ch: null,                nav: 'error',     sw: 'error',     hw: null, hideWhenEmpty: true },
   ];
-  const FIELDS = ROWS.filter(r => r.key);
-  const $ = id => document.getElementById(id);
-  const show = v => (v === undefined || v === null || v === '') ? '-' : (typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v));
 
-  // Build the results table once: one row per field, page and service worker columns.
-  (function buildTable() {
+  const $ = id => document.getElementById(id);
+
+  function show(key, v) {
+    if (v === undefined || v === null || v === '') return '-';
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    if (key === 'isa') return v === 'arm' ? 'ARM' : v;
+    return String(v);
+  }
+
+  // page: probe result from the page. sw: probe result from the service worker, or null.
+  function render(page, sw) {
+    // The hardware does not depend on the scope, so one measurement is enough:
+    // the service worker's when it has replied, otherwise the page's.
+    const hw = sw || page;
+
     const table = $('results');
+    table.replaceChildren();
+
     const head = table.insertRow();
-    for (const text of ['field', 'page', 'service worker']) {
+    for (const text of ['', 'Client Hints', 'navigator', 'service worker', 'hardware']) {
       const th = document.createElement('th');
       th.textContent = text;
       head.appendChild(th);
     }
+
     for (const row of ROWS) {
+      if (row.hideWhenEmpty && show(row.nav, page[row.nav]) === '-' && (!sw || show(row.sw, sw[row.sw]) === '-')) continue;
+
       const tr = table.insertRow();
-      if (row.group) {
-        const th = document.createElement('th');
-        th.colSpan = 3;
-        th.align = 'left';
-        th.textContent = row.group;
-        tr.appendChild(th);
-        continue;
-      }
       const th = document.createElement('th');
       th.align = 'left';
       th.textContent = row.label;
       tr.appendChild(th);
-      tr.insertCell().id = 'page-' + row.key;
-      tr.insertCell().id = 'sw-' + row.key;
-    }
-  })();
 
-  function setSwColumn(text) {
-    for (const f of FIELDS) $('sw-' + f.key).textContent = text;
-  }
+      tr.insertCell().textContent = row.ch ? show(row.ch, page[row.ch]) : '';
+      tr.insertCell().textContent = row.nav ? show(row.nav, page[row.nav]) : '';
 
-  function setVerdicts(rows) {
-    const table = $('verdicts');
-    table.replaceChildren();
-    const head = table.insertRow();
-    for (const text of ['check', 'result']) {
-      const th = document.createElement('th');
-      th.textContent = text;
-      head.appendChild(th);
-    }
-    for (const [check, result] of rows) {
-      const tr = table.insertRow();
-      tr.insertCell().textContent = check;
-      tr.insertCell().textContent = result;
-    }
-  }
+      // Service worker cell: blank until the worker replies, flagged when it disagrees with the page.
+      let swText = '';
+      if (row.sw && sw) {
+        swText = show(row.sw, sw[row.sw]);
+        if (row.nav && row.sw !== 'error' && swText !== show(row.nav, page[row.nav])) swText += ' (differs)';
+      }
+      tr.insertCell().textContent = swText;
 
-  // Architecture a scope claims, checked from the most to the least specific source.
-  function claimedArch(r) {
-    if (r.chArchitecture) {
-      return { source: 'Client Hints architecture', value: r.chArchitecture, arch: /arm/i.test(r.chArchitecture) ? 'arm' : 'x86' };
+      tr.insertCell().textContent = row.hw ? show(row.hw, hw[row.hw]) : '';
     }
-    if (r.platform) {
-      if (/arm|aarch64/i.test(r.platform)) return { source: 'navigator.platform', value: r.platform, arch: 'arm' };
-      if (/x86|i[3-6]86|win32|win64|macintel/i.test(r.platform)) return { source: 'navigator.platform', value: r.platform, arch: 'x86' };
-    }
-    if (r.userAgent) {
-      if (/aarch64|arm64|armv\d/i.test(r.userAgent)) return { source: 'userAgent', value: 'ARM token', arch: 'arm' };
-      if (/x86_64|x64|win64|wow64|intel/i.test(r.userAgent)) return { source: 'userAgent', value: 'x86 token', arch: 'x86' };
-    }
-    return null;
-  }
-
-  function claimVerdict(label, r) {
-    const claim = claimedArch(r);
-    if (r.isa !== 'x86' && r.isa !== 'arm') return [label, 'Hardware measurement unavailable (' + show(r.inferred) + ').'];
-    if (!claim) return [label, 'Measured ' + r.inferred + '. No architecture claim found to compare against.'];
-    const word = claim.arch === r.isa ? 'MATCHES' : 'CONTRADICTS';
-    return [label, claim.source + ' (' + claim.value + ') ' + word + ' the measured CPU, ' + r.inferred + '.'];
   }
 
   // Page-side probe.
+  let pageData = null;
   const pageResult = cpuProbe().then(r => {
-    for (const f of FIELDS) $('page-' + f.key).textContent = show(r[f.key]);
+    pageData = r;
+    render(r, null);
     return r;
   });
 
@@ -135,19 +106,16 @@
     const controller = navigator.serviceWorker.controller;
 
     if (!controller) {
-      setSwColumn('(reload)');
-      pageResult.then(page => setVerdicts([
-        ['service worker', 'Registered but not controlling this page yet. Reload the page to run the service worker probe.'],
-        claimVerdict('page claim vs CPU', page),
-      ]));
+      $('probe-status').textContent = 'Not run. The service worker does not control this page; use the Reload page button.';
+      if (pageData) render(pageData, null);
       return;
     }
 
-    setSwColumn('Waiting...');
+    $('probe-status').textContent = 'Running...';
 
     const swResult = new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new Error('The controlling service worker did not reply. An older sw.js may still be in control; reload the page.')),
+        () => reject(new Error('No reply. An older sw.js may still be in control; reload the page.')),
         5000
       );
       const channel = new MessageChannel();
@@ -160,38 +128,30 @@
 
     Promise.all([pageResult, swResult]).then(([page, sw]) => {
       if (run !== probeRun) return;  // A newer run has started; skip stale output.
-      let differs = [];
-      for (const f of FIELDS) {
-        let text = show(sw[f.key]);
-        if (f.key !== 'error' && text !== show(page[f.key])) {
-          text += ' [differs]';
-          differs.push(f.label);
-        }
-        $('sw-' + f.key).textContent = text;
-      }
-      setVerdicts([
-        ['page vs service worker', differs.length === 0
-          ? 'All values match. No page-only spoof is active.'
-          : differs.length + ' value(s) differ (' + differs.join(', ') + '). A page-only spoof is likely, and the service worker values show the real browser.'],
-        claimVerdict('page claim vs CPU', page),
-        claimVerdict('service worker claim vs CPU', sw),
-      ]);
+      $('probe-status').textContent = '✓ Done.';
+      render(page, sw);
       console.log('Page probe:', page);
       console.log('Service worker probe:', sw);
     }).catch(err => {
       if (run !== probeRun) return;
-      setSwColumn('(reload)');
-      pageResult.then(page => setVerdicts([
-        ['service worker', err.message],
-        claimVerdict('page claim vs CPU', page),
-      ]));
+      $('probe-status').textContent = '✗ ' + err.message;
+      pageResult.then(page => render(page, null));
     });
   }
 
+  // A hard reload (Ctrl+Shift+R) loads the page without its service worker even when
+  // that worker is already active, so an active registration with no controller means a hard reload.
   function reportStatus() {
-    $('status').textContent = navigator.serviceWorker.controller
-      ? '✓ Controlled by service worker. This page can now load offline.'
-      : 'Service worker registered but not controlling this page. Reload the page.';
+    if (navigator.serviceWorker.controller) {
+      $('status').textContent = '✓ Controlling this page. The page can load offline.';
+      return;
+    }
+    navigator.serviceWorker.getRegistration().then(reg => {
+      if (navigator.serviceWorker.controller) return;  // Control arrived in the meantime.
+      $('status').textContent = reg && reg.active
+        ? 'Active, but bypassed by a hard reload (Ctrl+Shift+R). Use the Reload page button.'
+        : 'Registered, not controlling this page yet. Use the Reload page button.';
+    });
   }
 
   $('reload').addEventListener('click', () => location.reload());
@@ -207,13 +167,11 @@
       });
     }).catch(err => {
       $('status').textContent = '✗ Registration failed: ' + err.message;
-      setSwColumn('-');
-      pageResult.then(page => setVerdicts([claimVerdict('page claim vs CPU', page)]));
+      $('probe-status').textContent = 'Not run.';
     });
   } else {
-    $('status').textContent = '✗ Service workers are not supported here (HTTPS or localhost required).';
-    setSwColumn('-');
-    pageResult.then(page => setVerdicts([claimVerdict('page claim vs CPU', page)]));
+    $('status').textContent = '✗ Not supported here (HTTPS or localhost required).';
+    $('probe-status').textContent = 'Not run.';
   }
 </script>
 </body>
